@@ -11,10 +11,11 @@
         {{ shape.label }}
       </button>
       <button @click="clearCanvas">清空画布</button>
+      <button @click="showExportDialog = true">导出PNG</button>
       <div v-if="selectedShapes.length > 0" class="transform-controls">
         <div class="color-picker">
           <label>颜色:</label>
-          <input type="color" v-model="selectedColor" @input="updateSelectedShapesColor">
+          <input type="color" v-model="currentColor" @input="updateSelectedShapesColor">
         </div>
         <button @click="flipSelectedShapes('horizontal')">水平翻转</button>
         <button @click="flipSelectedShapes('vertical')">垂直翻转</button>
@@ -22,6 +23,15 @@
       </div>
     </div>
     
+    <!-- 导出对话框组件 -->
+    <ExportDialog
+      v-model:visible="showExportDialog"
+      :canvas-width="canvas.width"
+      :canvas-height="canvas.height"
+      :drawn-shapes="drawnShapes"
+      @export="handleExport"
+    />
+
     <!-- 画布区域 -->
     <canvas 
       ref="canvas" 
@@ -30,26 +40,30 @@
       @mouseup="handleMouseUp"
       @mouseleave="handleMouseUp"
     ></canvas>
-    
-    <!-- 选择框 -->
-    <div 
-      v-if="isSelecting" 
-      class="selection-box"
-      :style="{
-        left: `${Math.min(startX, currentX)}px`,
-        top: `${Math.min(startY, currentY)}px`,
-        width: `${Math.abs(currentX - startX)}px`,
-        height: `${Math.abs(currentY - startY)}px`
-      }"
-    ></div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue';
+import { ref, onMounted } from 'vue';
+import ExportDialog from './ExportDialog.vue';
 
-// 画布引用
-const canvas = ref(null);
+// 导出相关状态
+const showExportDialog = ref(false);
+
+// 处理导出事件
+function handleExport({ canvas, fileName }) {
+  const link = document.createElement('a');
+  link.download = `${fileName}.png`;
+  link.href = canvas.toDataURL('image/png');
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
+// 画布引用 canvas初始化
+const canvas = ref({
+  width: 0,
+  height: 0
+});
 let ctx = null;
 let bufferCanvas = null; // 离屏画布（用于存储已完成图形）
 let bufferCtx = null;
@@ -63,7 +77,6 @@ const shapes = [
 ];
 const selectedShape = ref(null);
 const currentColor = ref('#ffffff'); // 填充色默认设置为白色
-const selectedColor = ref('#ffffff'); // 选中图形的颜色
 
 // 绘图状态
 const isDrawing = ref(false);
@@ -71,19 +84,22 @@ const isDragging = ref(false);
 const isSelecting = ref(false); // 是否正在框选
 const startX = ref(0);
 const startY = ref(0);
-const currentX = ref(0);
-const currentY = ref(0);
 
 // 图形状态
 const drawnShapes = ref([]);
-const selectedShapes = ref([]); // 存储选中的图形索引数组
+const selectedShapes = ref([]); // 存储选中的图形索引
 const dragOffset = ref({ x: 0, y: 0 });
 
 const isResizing = ref(false); // 是否正在调整大小
 const resizeDirection = ref(''); // 调整大小的方向
 const originalShapeData = ref(null); // 保存调整前的图形数据
 
+const selectionRect = ref({ x1: 0, y1: 0, x2: 0, y2: 0 }); // 选择框的坐标
+
 const MIN_SIZE_THRESHOLD = 5; // 最小尺寸阈值（像素）
+
+// 添加一个新的状态变量来跟踪当前模式
+const currentMode = ref('select'); // 'select' 或 'draw'
 
 // 初始化画布
 onMounted(() => {
@@ -99,10 +115,60 @@ onMounted(() => {
   window.addEventListener('resize', resizeCanvas);
 });
 
+// 导出为PNG功能
+function exportToPNG() {
+  // 询问文件名
+  const fileName = prompt('请输入导出文件名（不带扩展名）:', 'drawing') || 'drawing';
+
+  // 创建一个临时canvas来合并所有图层
+  const exportCanvas = document.createElement('canvas');
+  exportCanvas.width = canvas.value.width;
+  exportCanvas.height = canvas.value.height;
+  const exportCtx = exportCanvas.getContext('2d');
+  
+  // 1. 绘制背景（如果需要）
+  exportCtx.fillStyle = '#d5d6d2'; // 与画布背景色一致
+  exportCtx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
+  
+  // 2. 绘制所有图形
+  drawnShapes.value.forEach(shape => {
+    exportCtx.fillStyle = shape.fillColor || '#ffffff';
+    exportCtx.strokeStyle = '#000000';
+    exportCtx.lineWidth = 2;
+    
+    const { x1, y1, x2, y2 } = shape.points;
+    
+    switch (shape.type) {
+      case 'rect':
+        drawRect(x1, y1, x2 - x1, y2 - y1, exportCtx);
+        break;
+      case 'circle':
+        drawCircle(x1, y1, x2, y2, exportCtx);
+        break;
+      case 'line':
+        drawLine(x1, y1, x2, y2, exportCtx);
+        break;
+      case 'triangle':
+        drawTriangle(x1, y1, x2, y2, exportCtx);
+        break;
+    }
+  });
+  
+  // 3. 创建下载链接
+  const link = document.createElement('a');
+  link.download = 'drawing.png';
+  link.href = exportCanvas.toDataURL('image/png');
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  // 添加导出成功提示
+  alert(`图像已导出为 ${fileName}.png`);
+}
+
 // 更新选中图形的颜色
 function updateSelectedShapesColor() {
   selectedShapes.value.forEach(index => {
-    drawnShapes.value[index].fillColor = selectedColor.value;
+    drawnShapes.value[index].fillColor = currentColor.value;
   });
   updateBufferCanvas();
   redrawCanvas();
@@ -126,14 +192,16 @@ function resizeCanvas() {
 function selectShape(shape) {
   selectedShape.value = shape;
   selectedShapes.value = []; // 选择新图形时取消选中已有图形
+  currentMode.value = shape ? 'draw' : 'select'; // 如果选择了图形工具，则进入绘制模式
   redrawCanvas();
 }
 
 // 鼠标按下事件
 function handleMouseDown(e) {
   const [mouseX, mouseY] = getMousePos(e);
-  currentX.value = mouseX;
-  currentY.value = mouseY;
+  
+  // 检查是否按住Shift键进行多选
+  const isMultiSelect = e.shiftKey;
   
   // 检查是否点击了控制点
   if (selectedShapes.value.length === 1) {
@@ -151,75 +219,78 @@ function handleMouseDown(e) {
   // 首先检查是否点击了已有图形
   const clickedShapeIndex = findShapeAtPosition(mouseX, mouseY);
   
-  // 如果按住Shift键，则添加/移除选中状态
-  if (e.shiftKey && clickedShapeIndex !== null) {
-    const index = selectedShapes.value.indexOf(clickedShapeIndex);
-    if (index === -1) {
-      selectedShapes.value.push(clickedShapeIndex);
-    } else {
-      selectedShapes.value.splice(index, 1);
-    }
-    updateBufferCanvas();
-    redrawCanvas();
-    return;
-  }
-  
   if (clickedShapeIndex !== null) {
-    // 如果点击的图形未被选中，则只选中该图形
-    if (!selectedShapes.value.includes(clickedShapeIndex)) {
-      selectedShapes.value = [clickedShapeIndex];
-    }
-    
-    isDragging.value = true;
-    
-    // 计算鼠标与图形控制点的偏移量
-    const shape = drawnShapes.value[clickedShapeIndex];
-    const vertices = getShapeVertices(shape);
-    
-    // 找到距离点击位置最近的控制点
-    let nearestPoint = null;
-    let minDistance = Infinity;
-    
-    for (const point of Object.values(vertices)) {
-      const distance = Math.sqrt(Math.pow(mouseX - point.x, 2) + Math.pow(mouseY - point.y, 2));
-      if (distance < minDistance) {
-        minDistance = distance;
-        nearestPoint = point;
+    if (isMultiSelect) {
+      // 多选模式：添加或移除选中状态
+      const index = selectedShapes.value.indexOf(clickedShapeIndex);
+      if (index === -1) {
+        selectedShapes.value.push(clickedShapeIndex);
+      } else {
+        selectedShapes.value.splice(index, 1);
+      }
+    } else {
+      // 单选模式：只选中当前图形
+      if (selectedShapes.value.indexOf(clickedShapeIndex) === -1) {
+        selectedShapes.value = [clickedShapeIndex];
       }
     }
     
-    // 如果点击位置靠近某个控制点（5像素内），则使用该点作为基准
-    // 否则使用点击位置本身作为基准（自由拖动）
-    const referencePoint = minDistance <= 5 ? nearestPoint : { x: mouseX, y: mouseY };
-    
-    dragOffset.value = {
-      x: mouseX - referencePoint.x,
-      y: mouseY - referencePoint.y,
-      referenceX: referencePoint.x, // 存储参考点坐标
-      referenceY: referencePoint.y
-    };
+    // 准备拖动选中的图形
+    if (selectedShapes.value.length > 0) {
+      isDragging.value = true;
+      
+      // 计算鼠标与图形控制点的偏移量
+      const firstShape = drawnShapes.value[selectedShapes.value[0]];
+      const vertices = getShapeVertices(firstShape);
+      
+      // 找到距离点击位置最近的控制点
+      let nearestPoint = null;
+      let minDistance = Infinity;
+      
+      for (const point of Object.values(vertices)) {
+        const distance = Math.sqrt(Math.pow(mouseX - point.x, 2) + Math.pow(mouseY - point.y, 2));
+        if (distance < minDistance) {
+          minDistance = distance;
+          nearestPoint = point;
+        }
+      }
+      
+      // 如果点击位置靠近某个控制点（5像素内），则使用该点作为基准
+      // 否则使用点击位置本身作为基准（自由拖动）
+      const referencePoint = minDistance <= 5 ? nearestPoint : { x: mouseX, y: mouseY };
+      
+      dragOffset.value = {
+        x: mouseX - referencePoint.x,
+        y: mouseY - referencePoint.y,
+        referenceX: referencePoint.x, // 存储参考点坐标
+        referenceY: referencePoint.y
+      };
+    }
     
     updateBufferCanvas();
     redrawCanvas();
     return;
   }
   
-  if (!selectedShape.value) {
-    selectedShapes.value = [];
-    redrawCanvas();
-  }
-
-  // 如果没有点击图形且选择了绘图工具，则开始绘制新图形
-  if (selectedShape.value) {
+  // 根据当前模式决定行为
+  if (currentMode.value === 'draw' && selectedShape.value) {
+    // 绘制模式：开始绘制新图形
     isDrawing.value = true;
     [startX.value, startY.value] = [mouseX, mouseY];
     selectedShapes.value = []; // 开始绘制新图形时取消选中已有图形
     redrawCanvas(); // 清除之前的选中状态
   } else {
-    // 如果没有选择绘图工具，则开始框选
+    // 选择模式：开始框选
     isSelecting.value = true;
     [startX.value, startY.value] = [mouseX, mouseY];
-    selectedShapes.value = []; // 开始框选时清空选中
+    selectionRect.value = { x1: mouseX, y1: mouseY, x2: mouseX, y2: mouseY };
+    
+    // 如果没有按住Shift键，则清空当前选择
+    if (!isMultiSelect) {
+      selectedShapes.value = [];
+    }
+    
+    redrawCanvas();
   }
 }
 
@@ -278,8 +349,6 @@ function getShapeVertices(shape) {
 // 鼠标移动事件
 function handleMouseMove(e) {
   const [mouseX, mouseY] = getMousePos(e);
-  currentX.value = mouseX;
-  currentY.value = mouseY;
   
   // 处理调整大小
   if (isResizing.value && selectedShapes.value.length === 1) {
@@ -329,8 +398,12 @@ function handleMouseMove(e) {
 
   if (isDragging.value && selectedShapes.value.length > 0) {
     // 拖动选中的图形
-    const deltaX = mouseX - dragOffset.value.referenceX;
-    const deltaY = mouseY - dragOffset.value.referenceY;
+    const referenceX = mouseX - dragOffset.value.x;
+    const referenceY = mouseY - dragOffset.value.y;
+    
+    // 计算图形需要移动的增量
+    const deltaX = referenceX - dragOffset.value.referenceX;
+    const deltaY = referenceY - dragOffset.value.referenceY;
     
     // 更新所有选中图形的位置
     selectedShapes.value.forEach(index => {
@@ -344,8 +417,8 @@ function handleMouseMove(e) {
     });
     
     // 更新参考点位置（为下一次移动做准备）
-    dragOffset.value.referenceX = mouseX;
-    dragOffset.value.referenceY = mouseY;
+    dragOffset.value.referenceX = referenceX;
+    dragOffset.value.referenceY = referenceY;
     
     updateBufferCanvas();
     redrawCanvas();
@@ -375,42 +448,99 @@ function handleMouseMove(e) {
       }
     });
   } else if (isSelecting.value) {
-    // 框选过程中实时更新选择框
-    // 不需要重绘，因为选择框是独立的DOM元素
+    // 更新选择框
+    selectionRect.value = {
+      x1: startX.value,
+      y1: startY.value,
+      x2: mouseX,
+      y2: mouseY
+    };
+    
+    // 实时更新选中的图形
+    if (e.shiftKey) {
+      // 多选模式下，保留之前选中的图形
+      const newSelected = findShapesInSelection();
+      selectedShapes.value = [...new Set([...selectedShapes.value, ...newSelected])];
+    } else {
+      selectedShapes.value = findShapesInSelection();
+    }
+    
+    redrawCanvas();
   }
+}
+
+// 查找选择框内的图形
+function findShapesInSelection() {
+  const { x1, y1, x2, y2 } = selectionRect.value;
+  const left = Math.min(x1, x2);
+  const right = Math.max(x1, x2);
+  const top = Math.min(y1, y2);
+  const bottom = Math.max(y1, y2);
+  
+  const selectedIndices = [];
+  
+  drawnShapes.value.forEach((shape, index) => {
+    const shapeBounds = getShapeBounds(shape);
+    
+    // 检查图形是否在选择框内
+    if (
+      shapeBounds.left >= left &&
+      shapeBounds.right <= right &&
+      shapeBounds.top >= top &&
+      shapeBounds.bottom <= bottom
+    ) {
+      selectedIndices.push(index);
+    }
+  });
+  
+  return selectedIndices;
+}
+
+// 获取图形的边界框
+function getShapeBounds(shape) {
+  const { x1, y1, x2, y2 } = shape.points;
+  
+  if (shape.type === 'rect') {
+    return {
+      left: Math.min(x1, x2),
+      right: Math.max(x1, x2),
+      top: Math.min(y1, y2),
+      bottom: Math.max(y1, y2)
+    };
+  } else if (shape.type === 'circle') {
+    const radius = Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
+    return {
+      left: x1 - radius,
+      right: x1 + radius,
+      top: y1 - radius,
+      bottom: y1 + radius
+    };
+  } else if (shape.type === 'line') {
+    return {
+      left: Math.min(x1, x2),
+      right: Math.max(x1, x2),
+      top: Math.min(y1, y2),
+      bottom: Math.max(y1, y2)
+    };
+  } else if (shape.type === 'triangle') {
+    const x3 = x1 * 2 - x2;
+    return {
+      left: Math.min(x1, x2, x3),
+      right: Math.max(x1, x2, x3),
+      top: Math.min(y1, y2),
+      bottom: Math.max(y1, y2)
+    };
+  }
+  
+  return { left: 0, right: 0, top: 0, bottom: 0 };
 }
 
 // 鼠标释放事件
 function handleMouseUp(e) {
-  // 处理框选结束
-  if (isSelecting.value) {
-    const [mouseX, mouseY] = getMousePos(e);
-    const selectionBox = {
-      x1: Math.min(startX.value, mouseX),
-      y1: Math.min(startY.value, mouseY),
-      x2: Math.max(startX.value, mouseX),
-      y2: Math.max(startY.value, mouseY)
-    };
-    
-    // 查找在选择框内的所有图形
-    selectedShapes.value = [];
-    drawnShapes.value.forEach((shape, index) => {
-      if (isShapeInSelectionBox(shape, selectionBox)) {
-        selectedShapes.value.push(index);
-      }
-    });
-    
-    // 更新选中图形的颜色（用于颜色选择器）
-    if (selectedShapes.value.length > 0) {
-      selectedColor.value = drawnShapes.value[selectedShapes.value[0]].fillColor;
-    }
-  }
-
-  // 重置状态
+  // 重置调整大小状态
   isResizing.value = false;
   resizeDirection.value = '';
   originalShapeData.value = null;
-  isSelecting.value = false;
 
   if (isDrawing.value && selectedShape.value) {
     // 完成绘制新图形
@@ -432,51 +562,31 @@ function handleMouseUp(e) {
       drawnShapes.value.push(newShape);
       updateBufferCanvas();
     }
+
+    // 绘制完成后自动切换回选择模式
+    currentMode.value = 'select';
+    selectedShape.value = null;
+  } else if (isSelecting.value) {
+    // 完成框选
+    const [mouseX, mouseY] = getMousePos(e);
+    selectionRect.value = {
+      x1: startX.value,
+      y1: startY.value,
+      x2: mouseX,
+      y2: mouseY
+    };
+    
+    // 如果选择框太小，则视为点击而不是框选
+    if (Math.abs(mouseX - startX.value) < 5 && Math.abs(mouseY - startY.value) < 5) {
+      selectedShapes.value = [];
+    }
   }
   
   isDrawing.value = false;
   isDragging.value = false;
+  isSelecting.value = false;
+  updateBufferCanvas();
   redrawCanvas();
-}
-
-// 检查图形是否在选择框内
-function isShapeInSelectionBox(shape, selectionBox) {
-  const { x1: selX1, y1: selY1, x2: selX2, y2: selY2 } = selectionBox;
-  const { x1, y1, x2, y2 } = shape.points;
-  
-  switch (shape.type) {
-    case 'rect':
-      // 检查矩形的四个角是否都在选择框内
-      const rectLeft = Math.min(x1, x2);
-      const rectRight = Math.max(x1, x2);
-      const rectTop = Math.min(y1, y2);
-      const rectBottom = Math.max(y1, y2);
-      
-      return rectLeft >= selX1 && rectRight <= selX2 && 
-             rectTop >= selY1 && rectBottom <= selY2;
-    case 'circle':
-      // 检查圆的外接矩形是否在选择框内
-      const radius = Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
-      const circleLeft = x1 - radius;
-      const circleRight = x1 + radius;
-      const circleTop = y1 - radius;
-      const circleBottom = y1 + radius;
-      
-      return circleLeft >= selX1 && circleRight <= selX2 && 
-             circleTop >= selY1 && circleBottom <= selY2;
-    case 'line':
-      // 检查线的两个端点是否都在选择框内
-      return x1 >= selX1 && x1 <= selX2 && y1 >= selY1 && y1 <= selY2 &&
-             x2 >= selX1 && x2 <= selX2 && y2 >= selY1 && y2 <= selY2;
-    case 'triangle':
-      // 检查三角形的三个顶点是否都在选择框内
-      const x3 = x1 * 2 - x2;
-      return x1 >= selX1 && x1 <= selX2 && y1 >= selY1 && y1 <= selY2 &&
-             x2 >= selX1 && x2 <= selX2 && y2 >= selY1 && y2 <= selY2 &&
-             x3 >= selX1 && x3 <= selX2 && y2 >= selY1 && y2 <= selY2;
-    default:
-      return false;
-  }
 }
 
 // 添加辅助方法：检查图形是否满足最小尺寸要求
@@ -633,6 +743,22 @@ function clearCanvas() {
 function redrawCanvas() {
   ctx.clearRect(0, 0, canvas.value.width, canvas.value.height);
   ctx.drawImage(bufferCanvas, 0, 0);
+  
+  // 如果正在框选，绘制选择框
+  if (isSelecting.value) {
+    const { x1, y1, x2, y2 } = selectionRect.value;
+    ctx.save();
+    ctx.strokeStyle = '#0095ff';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([5, 5]);
+    ctx.strokeRect(
+      Math.min(x1, x2),
+      Math.min(y1, y2),
+      Math.abs(x2 - x1),
+      Math.abs(y2 - y1)
+    );
+    ctx.restore();
+  }
 }
 
 // 获取鼠标位置
@@ -679,12 +805,12 @@ function flipSelectedShapes(direction) {
 function deleteSelectedShapes() {
   if (selectedShapes.value.length === 0) return;
   
-  // 从大到小排序索引，以便正确删除
-  const sortedIndices = [...selectedShapes.value].sort((a, b) => b - a);
-  
-  sortedIndices.forEach(index => {
-    drawnShapes.value.splice(index, 1);
-  });
+  // 从后往前删除，避免索引变化
+  selectedShapes.value
+    .sort((a, b) => b - a)
+    .forEach(index => {
+      drawnShapes.value.splice(index, 1);
+    });
   
   selectedShapes.value = [];
   updateBufferCanvas();
@@ -762,7 +888,6 @@ function drawTriangle(x1, y1, x2, y2, context = ctx) {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  position: relative;
 }
 
 .toolbar {
@@ -807,12 +932,5 @@ canvas {
   border: 1px solid #ddd;
   cursor: crosshair;
   flex-grow: 1;
-}
-
-.selection-box {
-  position: absolute;
-  border: 2px dashed #007bff;
-  background-color: rgba(0, 123, 255, 0.1);
-  pointer-events: none;
 }
 </style>
